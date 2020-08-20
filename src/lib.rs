@@ -8,6 +8,12 @@ use std::os::unix::fs::MetadataExt;
 use std::thread::sleep;
 use std::time::Duration;
 
+#[derive(Debug)]
+pub enum LogWatcherAction{
+    None,
+    SeekToEnd,
+}
+
 pub struct LogWatcher {
     filename: String,
     inode: u64,
@@ -39,13 +45,10 @@ impl LogWatcher {
             finish: false,
         })
     }
-    pub fn force_reopen(&mut self) {
-        self.finish = true;
-    }
 
     fn reopen_if_log_rotated<F: ?Sized>(&mut self, callback: &mut F)
     where
-        F: FnMut(String),
+        F: FnMut(String) -> LogWatcherAction,
     {
         loop {
             match File::open(self.filename.clone()) {
@@ -83,17 +86,26 @@ impl LogWatcher {
 
     pub fn watch<F: ?Sized>(&mut self, callback: &mut F)
     where
-        F: FnMut(String),
+        F: FnMut(String) -> LogWatcherAction,
     {
         loop {
             let mut line = String::new();
+            assert_eq!(self.pos, self.reader.seek(SeekFrom::Current(0)).unwrap());
             let resp = self.reader.read_line(&mut line);
             match resp {
                 Ok(len) => {
                     if len > 0 {
-                        self.pos += len as u64;
-                        self.reader.seek(SeekFrom::Start(self.pos)).unwrap();
-                        callback(line.replace("\n", ""));
+                        match callback(line.replace("\n", ""))
+                        {
+                            LogWatcherAction::SeekToEnd => {
+                                let _res = self.reader.seek(SeekFrom::End(0));
+                                self.pos = _res.unwrap() as u64;
+                            }
+                            LogWatcherAction::None => {
+                                self.pos += len as u64;
+                                self.reader.seek(SeekFrom::Start(self.pos)).unwrap();
+                            }
+                        }
                         line.clear();
                     } else {
                         if self.finish {
